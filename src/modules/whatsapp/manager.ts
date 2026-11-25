@@ -28,7 +28,7 @@ export class WhatsAppManager {
         if (!this.io) throw new Error("Socket.IO not initialized in WhatsAppManager");
         const sessions = await prisma.session.findMany({
             where: {
-                status: { not: "LOGGED_OUT" }
+                status: { notIn: ["LOGGED_OUT", "STOPPED"] }
             },
             select: { sessionId: true, userId: true, status: true }
         });
@@ -52,8 +52,13 @@ export class WhatsAppManager {
             const instance = new WhatsAppInstance(session.sessionId, session.userId, this.io);
             instance.onRemovedFromManager = () => this.removeInstance(session.sessionId);
             this.sessions.set(session.sessionId, instance);
-            await instance.init();
-            started++;
+            try {
+                await instance.init();
+                started++;
+            } catch (error) {
+                this.sessions.delete(session.sessionId);
+                logger.error("Manager", `Failed restoring session ${session.sessionId}:`, error);
+            }
         }
         logger.success("Manager", `Loaded ${started} sessions (${sessions.length - started} idle skipped).`);
     }
@@ -115,23 +120,18 @@ export class WhatsAppManager {
 
     async stopSession(sessionId: string) {
         const instance = this.sessions.get(sessionId);
-        if (instance) {
-            await instance.shutdown();
-            instance.status = "STOPPED";
-            this.io?.to(sessionId).emit("connection.update", { status: "STOPPED", qr: null });
-            await prisma.session.update({
-                where: { sessionId },
-                data: { status: "STOPPED" }
-            }).catch(() => {});
-            // Remove from memory immediately
-            this.sessions.delete(sessionId);
-        }
+        if (instance) await instance.shutdown();
+        this.sessions.delete(sessionId);
+        await prisma.session.update({
+            where: { sessionId }, data: { status: "STOPPED", qr: null }
+        });
+        this.io?.to(sessionId).emit("connection.update", { sessionId, status: "STOPPED", qr: null });
     }
 
     async startSession(sessionId: string) {
         // If already running, do nothing
         const existingInstance = this.sessions.get(sessionId);
-        if (existingInstance && existingInstance.status === "CONNECTED") {
+        if (existingInstance?.socket && ["CONNECTING", "SCAN_QR", "CONNECTED"].includes(existingInstance.status)) {
             return;
         }
 

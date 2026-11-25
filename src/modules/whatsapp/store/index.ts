@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import type { WASocket, WAMessage, Contact } from "@whiskeysockets/baileys";
 import { normalizeMessageContent } from "@whiskeysockets/baileys";
+import { bindV16Receipts, v16Status } from "../tracking-v16"; // TAZORIXX ANALYTICS V16
 import { onMessageReceived, onMessageSent, dispatchWebhook, downloadAndSaveMedia } from "@/lib/webhook";
 import { handleBotCommand, setSessionStartTime } from "../bot/command-handler";
 import { resolveToPhoneJid, isLidJid, normalizeJid } from "@/lib/jid-utils";
@@ -11,6 +12,7 @@ import { logger } from "@/lib/logger";
 export const bindSessionStore = (sock: WASocket, sessionId: string, io: Server | null) => {
     // Set start time for uptime command
     setSessionStartTime(sessionId);
+    bindV16Receipts(sock, sessionId);
 
     // First, get the database Session ID (cuid)
     let dbSessionId: string | null = null;
@@ -175,18 +177,15 @@ export const bindSessionStore = (sock: WASocket, sessionId: string, io: Server |
                 const keyId = update.key?.id;
                 if (!keyId) continue;
 
-                const statusMap: Record<number, string> = {
-                    0: 'PENDING',
-                    1: 'SENT',
-                    2: 'DELIVERED',
-                    3: 'READ',
-                    4: 'READ', // Played
-                };
-
-                const status = statusMap[update.update?.status || 0] || 'PENDING';
-
+                // TAZORIXX ANALYTICS V16: use installed protocol enum, not guessed numbers.
+                const status = v16Status(update.update?.status);
+                if (!status) continue;
+                // Late/duplicate acknowledgments must not downgrade an already confirmed read.
+                const previous = status === 'READ' ? ['PENDING','SENT','DELIVERED','FAILED'] :
+                    status === 'DELIVERED' ? ['PENDING','SENT','FAILED'] :
+                    status === 'SENT' ? ['PENDING','FAILED'] : ['PENDING','SENT'];
                 await prisma.message.updateMany({
-                    where: { sessionId: dbSessionId, keyId },
+                    where: { sessionId: dbSessionId, keyId, status: { in: previous as any } },
                     data: { status: status as any }
                 });
 
@@ -401,13 +400,8 @@ async function processAndSaveMessage(
     });
 
     if (existingMessage) {
-        // Message exists! Update status if changed, but DO NOT re-trigger webhooks/bot
-        if (fromMe && existingMessage.status !== 'SENT') {
-            await prisma.message.update({
-                where: { id: existingMessage.id },
-                data: { status: 'SENT' }
-            });
-        }
+        // TAZORIXX ANALYTICS V16: a repeated upsert must not erase delivery/read evidence.
+        // No status is inferred from the existence of an outgoing message.
         // Return null to indicate "Not New"
         return null;
     }

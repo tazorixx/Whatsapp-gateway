@@ -51,8 +51,23 @@ export function SessionManager({ user }: { user: any }) {
             addTrailingSlash: false,
         });
 
+        // Authenticated socket must explicitly join each accessible session room.
+        const refreshAndJoin = async () => {
+            try {
+                const res = await fetch('/api/sessions', { cache: 'no-store' });
+                if (!res.ok) return;
+                const response = await res.json();
+                const list: Session[] = Array.isArray(response?.data) ? response.data : [];
+                setSessions(list);
+                if (socketInstance.connected) {
+                    for (const item of list) if (item.sessionId) socketInstance.emit('join-session', item.sessionId);
+                }
+            } catch (err) {
+                console.error('Unable to refresh session status', err);
+            }
+        };
         socketInstance.on('connect', () => {
-            console.log('Socket connected');
+            void refreshAndJoin();
         });
 
         socketInstance.on('connection.update', (data: { sessionId: string, status: string, qr: string }) => {
@@ -69,9 +84,12 @@ export function SessionManager({ user }: { user: any }) {
             }
         });
 
+        // Poll as a fallback when Socket.IO is unavailable or events are missed.
+        const statusPoll = setInterval(() => { void refreshAndJoin(); }, 15000);
         setSocket(socketInstance);
 
         return () => {
+            clearInterval(statusPoll);
             socketInstance.disconnect();
         };
     }, []);

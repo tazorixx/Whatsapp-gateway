@@ -10,6 +10,7 @@ import { setupSocket } from "./socket";
 import { waManager } from "../modules/whatsapp/manager";
 import { logger } from "../lib/logger";
 import { runAutoMigration } from "../lib/auto-migrate";
+import { startBroadcastWorker } from "../modules/whatsapp/broadcast-worker";
 import pkg from "../../package.json";
 
 const dev = process.env.NODE_ENV !== "production";
@@ -91,7 +92,8 @@ app.prepare().then(async () => {
 
   // Initialize WhatsApp Manager
   waManager.setup(io);
-  waManager.loadSessions();
+  void waManager.loadSessions().catch(err => logger.error("Manager", "Session restore failed:", err));
+  startBroadcastWorker();
 
   // Start Scheduler
   import("../modules/whatsapp/scheduler").then(m => m.startScheduler());

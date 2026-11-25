@@ -18,6 +18,7 @@ import { useTranslations } from "next-intl";
 interface BroadcastProgress {
     broadcastId: string;
     status: "running" | "completed";
+    paused?: boolean;
     total: number;
     sent: number;
     failed: number;
@@ -60,6 +61,7 @@ export default function BroadcastPage() {
     const [delay, setDelay] = useState([2000]);
     const [loading, setLoading] = useState(false);
     const [broadcastProgress, setBroadcastProgress] = useState<BroadcastProgress | null>(null);
+    const [activeBroadcastId, setActiveBroadcastId] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<"new" | "history">("new");
 
     // History
@@ -84,6 +86,8 @@ export default function BroadcastPage() {
             setBroadcastProgress(data);
             if (data.status === "completed") {
                 setLoading(false);
+                setActiveBroadcastId(null);
+                if (sessionId) sessionStorage.removeItem(`wa-active-broadcast-${sessionId}`);
                 // Refresh history after completion
                 fetchHistory();
                 if (data.failed === 0) {
@@ -114,6 +118,51 @@ export default function BroadcastPage() {
             setHistoryLoading(false);
         }
     }, [sessionId]);
+
+    // Recover a running broadcast's progress after page refresh.
+    useEffect(() => {
+        if (!sessionId) return;
+        const remembered = sessionStorage.getItem(`wa-active-broadcast-${sessionId}`);
+        if (remembered) { setActiveBroadcastId(remembered); setLoading(true); }
+    }, [sessionId]);
+
+    // Poll server history as a fallback when the realtime socket disconnects.
+    useEffect(() => {
+        if (!sessionId || !activeBroadcastId) return;
+        let closed = false;
+        let fetching = false;
+        const poll = async () => {
+            if (fetching || closed) return;
+            fetching = true;
+            try {
+                const res = await fetch(`/api/messages/${sessionId}/broadcast/history/${activeBroadcastId}`, { cache: "no-store" });
+                if (!res.ok) return;
+                const payload = await res.json();
+                const job = payload.data as BroadcastLog;
+                if (!job || closed) return;
+                const complete = job.status === "completed";
+                setBroadcastProgress({
+                    broadcastId: job.id,
+                    status: complete ? "completed" : "running",
+                    paused: job.status === "paused",
+                    total: job.total, sent: job.sent, failed: job.failed,
+                    progress: job.total ? Math.round(((job.sent + job.failed) / job.total) * 100) : 0,
+                    errors: complete ? (job.recipients || []).filter(r => r.status === "failed" || r.status === "unknown")
+                        .map(r => ({ jid: r.jid, error: r.error || "Unconfirmed" })) : undefined
+                });
+                if (complete) {
+                    setLoading(false);
+                    setActiveBroadcastId(null);
+                    sessionStorage.removeItem(`wa-active-broadcast-${sessionId}`);
+                    void fetchHistory();
+                }
+            } catch (err) { console.error("Broadcast progress poll failed", err); }
+            finally { fetching = false; }
+        };
+        void poll();
+        const timer = setInterval(() => { void poll(); }, 2500);
+        return () => { closed = true; clearInterval(timer); };
+    }, [sessionId, activeBroadcastId, fetchHistory]);
 
     // Load history on mount & tab switch
     useEffect(() => {
@@ -171,6 +220,10 @@ export default function BroadcastPage() {
             const data = await res.json();
 
             if (res.ok) {
+                if (data?.data?.broadcastId) {
+                    setActiveBroadcastId(data.data.broadcastId);
+                    sessionStorage.setItem(`wa-active-broadcast-${sessionId}`, data.data.broadcastId);
+                }
                 toast.info(t("broadcastStarted", { count: recipients.length }));
             } else {
                 toast.error(data.message || t("failedToStart"));
@@ -303,7 +356,9 @@ export default function BroadcastPage() {
                             }`}>
                                 <CardHeader className="pb-3">
                                     <CardTitle className="flex items-center gap-2 text-lg">
-                                        {broadcastProgress.status === "running" ? (
+                                        {broadcastProgress.paused ? (
+                                            <><AlertTriangle className="h-5 w-5 text-yellow-500" /><span>Waiting for WhatsApp connection — resumes automatically</span></>
+                                        ) : broadcastProgress.status === "running" ? (
                                             <><Radio className="h-5 w-5 text-blue-500 animate-pulse" /><span>{t("broadcastInProgress")}</span></>
                                         ) : broadcastProgress.failed === 0 ? (
                                             <><CheckCircle2 className="h-5 w-5 text-green-500" /><span>{t("broadcastCompleted")}</span></>

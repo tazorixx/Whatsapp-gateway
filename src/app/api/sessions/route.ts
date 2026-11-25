@@ -15,7 +15,15 @@ export async function GET(request: NextRequest) {
 
         // Get sessions based on user role
         const sessions = await getAccessibleSessions(user.id, user.role);
-        return NextResponse.json({ status: true, message: "Sessions retrieved successfully", data: sessions });
+        // Always report in-process connection truth, not a potentially stale DB value.
+        // Keep storedStatus separately for diagnostics and backward compatibility.
+        const liveSessions = sessions.map((session) => {
+            const active = waManager.getInstance(session.sessionId);
+            const runtimeStatus = active?.status ??
+                (session.status === "STOPPED" || session.status === "LOGGED_OUT" ? session.status : "DISCONNECTED");
+            return { ...session, storedStatus: session.status, status: runtimeStatus, runtimeStatus };
+        });
+        return NextResponse.json({ status: true, message: "Sessions retrieved successfully", data: liveSessions });
     } catch (error) {
         console.error("Get sessions error:", error);
         return NextResponse.json({ status: false, message: "Failed to fetch sessions", error: "Failed to fetch sessions" }, { status: 500 });
